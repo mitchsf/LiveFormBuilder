@@ -8,8 +8,10 @@
    Usage:
      LiveFormBuilder liveForm;
      liveForm.setTitle("My Device v1.0");
+     liveForm.setSubtitle("Live Settings");
      liveForm.setSaveCallback(mySaveFunc);
      liveForm.setOnChange(myChangeFunc);
+     liveForm.setOnTextChange(myTextFunc);
      liveForm.begin(&server);
      // in loop: liveForm.handleClient();
   ----------------------------------------------------------------------*/
@@ -36,7 +38,8 @@ enum LiveFieldType {
   LF_SUBHEADING,
   LF_SEPARATOR,
   LF_COLORPICKER,
-  LF_DROPDOWN_OFFSET   // stored value = index + offset
+  LF_DROPDOWN_OFFSET,  // stored value = index + offset
+  LF_TEXTINPUT         // text input with send button
 };
 
 struct LiveField {
@@ -46,83 +49,57 @@ struct LiveField {
   String options[LF_MAX_OPTIONS];
   int    optionCount;
   int    minVal;
-  int    maxVal;
-  int*   presetPtr;       // direct pointer to preset variable
-  int    offset;          // for DROPDOWN_OFFSET: stored = selected + offset
-  String rangeId;         // short ID for range value display span
+  int    maxVal;       // also used as maxLength for text inputs
+  int*   presetPtr;    // direct pointer to preset variable
+  int    offset;       // for DROPDOWN_OFFSET: stored = selected + offset
+  String rangeId;      // short ID for range value display span
+  String placeholder;  // text input placeholder
+  String buttonLabel;  // text input button label
   bool   (*condition)();  // nullptr = always show
 };
 
-/**
- * Callback: called after save button pressed and NVS write requested
- */
 typedef void (*LiveSaveCallback)();
-
-/**
- * Callback: called when any field changes
- * Return: field name and new (raw) value
- * Use for side effects (brightLevel, setPIR, etc.)
- */
 typedef void (*LiveChangeCallback)(const String& field, int value);
+typedef void (*LiveTextCallback)(const String& field, const String& value);
 
 class LiveFormBuilder {
 public:
   LiveFormBuilder();
 
-  /** Set the page title (first line of header) */
   void setTitle(const String& title);
-
-  /** Set subtitle (second line of header, e.g. "Live Settings") */
   void setSubtitle(const String& subtitle);
-
-  /** Register save callback - called when Save button pressed */
   void setSaveCallback(LiveSaveCallback cb);
-
-  /** Register onChange callback - called after each field update */
   void setOnChange(LiveChangeCallback cb);
-
-  /** Initialize with WiFiServer pointer */
+  void setOnTextChange(LiveTextCallback cb);
   void begin(WiFiServer* server);
-
-  /** Call from loop() when WiFi is connected */
   void handleClient();
 
-  // -- Field builders --------------------------------------------------
-
-  /** Add a dropdown with comma-separated options, bound to *preset */
   void addDropDown(const String& label, const String& field,
                    const String& options, int* preset);
-
-  /** Add a dropdown where stored value = selected index + offset */
   void addDropDownOffset(const String& label, const String& field,
                          const String& options, int* preset, int offset);
-
-  /** Add a range slider, bound to *preset */
   void addRange(const String& label, const String& field,
                 int minVal, int maxVal, int* preset, const String& id);
-
-  /** Add a visual section subheading */
   void addSubheading(const String& text);
-
-  /** Add a color picker, bound to *preset (stores RGB as int) */
+  void addConditionalSubheading(bool (*condition)(), const String& text);
   void addColorPicker(const String& label, const String& field, int* preset);
-
-  /** Add a horizontal separator line */
   void addSeparator();
-
-  /** Add a conditional dropdown - only renders when condition() returns true */
   void addConditionalDropDown(bool (*condition)(),
                                const String& label, const String& field,
                                const String& options, int* preset);
+  void addTextInput(const String& label, const String& field,
+                    const String& placeholder, int maxLength,
+                    const String& buttonLabel = "Send");
 
 private:
-  WiFiServer*       _server;
-  String            _title;
-  String            _subtitle;
-  LiveSaveCallback  _saveCb;
+  WiFiServer*        _server;
+  String             _title;
+  String             _subtitle;
+  LiveSaveCallback   _saveCb;
   LiveChangeCallback _changeCb;
-  LiveField         _fields[LF_MAX_FIELDS];
-  int               _fieldCount;
+  LiveTextCallback   _textCb;
+  LiveField          _fields[LF_MAX_FIELDS];
+  int                _fieldCount;
 
   void parseOptions(const String& csv, String out[], int& count);
   void serveForm(WiFiClient& client);
@@ -134,6 +111,8 @@ private:
   void genSubheading(String& h, int idx);
   void genColorPicker(String& h, int idx);
   void genSeparator(String& h);
+  void genTextInput(String& h, int idx);
+  static String urlDecode(const String& input);
 };
 
-#endif // LIVEFORMBUILDER_H
+#endif
