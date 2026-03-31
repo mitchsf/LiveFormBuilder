@@ -5,17 +5,37 @@
 #include "LiveFormBuilder.h"
 
 LiveFormBuilder::LiveFormBuilder()
-  : _server(nullptr), _title("Live Settings"), _subtitle("Live Settings"),
-    _saveCb(nullptr), _changeCb(nullptr), _fieldCount(0)
+  : _server(nullptr), _title("Live Settings"), _subtitle(""),
+    _saveCb(nullptr), _changeCb(nullptr), _textCb(nullptr), _fieldCount(0)
 {}
 
 void LiveFormBuilder::setTitle(const String& title) { _title = title; }
 void LiveFormBuilder::setSubtitle(const String& subtitle) { _subtitle = subtitle; }
 void LiveFormBuilder::setSaveCallback(LiveSaveCallback cb) { _saveCb = cb; }
 void LiveFormBuilder::setOnChange(LiveChangeCallback cb) { _changeCb = cb; }
+void LiveFormBuilder::setOnTextChange(LiveTextCallback cb) { _textCb = cb; }
 
 void LiveFormBuilder::begin(WiFiServer* server) {
   _server = server;
+}
+
+// -- URL decode ----------------------------------------------------------
+
+String LiveFormBuilder::urlDecode(const String& input) {
+  String decoded;
+  decoded.reserve(input.length());
+  for (int i = 0; i < (int)input.length(); i++) {
+    if (input[i] == '+') {
+      decoded += ' ';
+    } else if (input[i] == '%' && i + 2 < (int)input.length()) {
+      char hex[3] = { input[i + 1], input[i + 2], 0 };
+      decoded += (char)strtol(hex, nullptr, 16);
+      i += 2;
+    } else {
+      decoded += input[i];
+    }
+  }
+  return decoded;
 }
 
 // -- Field builders ------------------------------------------------------
@@ -86,6 +106,15 @@ void LiveFormBuilder::addSubheading(const String& text) {
   f.condition = nullptr;
 }
 
+void LiveFormBuilder::addConditionalSubheading(bool (*condition)(), const String& text) {
+  if (_fieldCount >= LF_MAX_FIELDS) return;
+  LiveField& f = _fields[_fieldCount++];
+  f.type = LF_SUBHEADING;
+  f.label = text;
+  f.presetPtr = nullptr;
+  f.condition = condition;
+}
+
 void LiveFormBuilder::addSeparator() {
   if (_fieldCount >= LF_MAX_FIELDS) return;
   LiveField& f = _fields[_fieldCount++];
@@ -119,6 +148,21 @@ void LiveFormBuilder::addConditionalDropDown(bool (*condition)(),
   parseOptions(options, f.options, f.optionCount);
 }
 
+void LiveFormBuilder::addTextInput(const String& label, const String& field,
+                                    const String& placeholder, int maxLength,
+                                    const String& buttonLabel) {
+  if (_fieldCount >= LF_MAX_FIELDS) return;
+  LiveField& f = _fields[_fieldCount++];
+  f.type = LF_TEXTINPUT;
+  f.label = label;
+  f.fieldName = field;
+  f.placeholder = placeholder;
+  f.maxVal = maxLength;
+  f.buttonLabel = buttonLabel;
+  f.presetPtr = nullptr;
+  f.condition = nullptr;
+}
+
 // -- Client handling -----------------------------------------------------
 
 void LiveFormBuilder::handleClient() {
@@ -130,7 +174,7 @@ void LiveFormBuilder::handleClient() {
 
   client.setTimeout(100);
   String req = client.readStringUntil('\r');
-  client.readString();  // flush remaining headers
+  client.readString();
 
   if (req.indexOf("/?save=1") >= 0) {
     handleSave(client);
@@ -142,7 +186,6 @@ void LiveFormBuilder::handleClient() {
     return;
   }
 
-  // Serve the form page
   serveForm(client);
 }
 
@@ -171,6 +214,16 @@ void LiveFormBuilder::handleAjax(WiFiClient& client, const String& req) {
     int ve = req.indexOf(' ', vs);
     value  = req.substring(vs, ve);
   }
+
+  // Check for text input fields first
+  for (int i = 0; i < _fieldCount; i++) {
+    if (_fields[i].fieldName == field && _fields[i].type == LF_TEXTINPUT) {
+      if (_textCb) _textCb(field, urlDecode(value));
+      sendOK(client);
+      return;
+    }
+  }
+
   int v = value.toInt();
 
   // Find matching field and update preset
@@ -187,13 +240,12 @@ void LiveFormBuilder::handleAjax(WiFiClient& client, const String& req) {
         *f.presetPtr = constrain(v, 0, f.optionCount - 1);
       }
       else if (f.type == LF_COLORPICKER) {
-        *f.presetPtr = v;  // store RGB int directly
+        *f.presetPtr = v;
       }
       break;
     }
   }
 
-  // Notify app of change for side effects
   if (_changeCb) _changeCb(field, v);
 
   sendOK(client);
@@ -244,8 +296,7 @@ void LiveFormBuilder::genRange(String& h, int idx) {
 }
 
 void LiveFormBuilder::genSubheading(String& h, int idx) {
-  h += "<div class=\"sep\"></div>";
-  h += "<h2 style=\"font-size:1.5rem;font-weight:600;color:#1e293b;margin:40px 0 20px 0;padding-bottom:10px;border-bottom:2px solid #e2e8f0;\">";
+  h += "<h2 class=\"sh\">";
   h += _fields[idx].label;
   h += "</h2>";
 }
@@ -269,21 +320,41 @@ void LiveFormBuilder::genColorPicker(String& h, int idx) {
   h += "',parseInt(this.value.substring(1),16))\"></div>";
 }
 
+void LiveFormBuilder::genTextInput(String& h, int idx) {
+  LiveField& f = _fields[idx];
+  h += "<div class=\"fg\"><label class=\"fl\">";
+  h += f.label;
+  h += "</label><div class=\"tr\">";
+  h += "<input type=\"text\" id=\"";
+  h += f.fieldName;
+  h += "\" maxlength=\"";
+  h += f.maxVal;
+  h += "\" placeholder=\"";
+  h += f.placeholder;
+  h += "\" autocomplete=\"off\" autocorrect=\"off\" autocapitalize=\"off\" spellcheck=\"false\">";
+  h += "<button type=\"button\" class=\"sb\" onclick=\"sendText('";
+  h += f.fieldName;
+  h += "')\">";
+  h += f.buttonLabel;
+  h += "</button></div></div>";
+}
+
 void LiveFormBuilder::serveForm(WiFiClient& client) {
   String h;
-  h.reserve(5000);
+  h.reserve(8500);
 
   h += "<!DOCTYPE html><html lang=\"en\"><head>";
   h += "<meta charset=\"UTF-8\">";
   h += "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1.0\">";
-  h += "<title>"; h += _title; h += " "; h += _subtitle; h += "</title>";
+  h += "<title>"; h += _title; h += "</title>";
   h += "<style>";
   h += ":root{--pc:#2563eb;--ph:#1d4ed8;--sc:#059669;--bg:#f8fafc;--cb:#ffffff;--tp:#1e293b;--br:#e2e8f0;--bf:#3b82f6;--sl:0 10px 15px -3px rgba(0,0,0,.1);}";
   h += "*{box-sizing:border-box;}";
   h += "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:linear-gradient(135deg,var(--bg),#e2e8f0);margin:0;padding:20px;color:var(--tp);line-height:1.6;}";
   h += "#container{max-width:800px;margin:0 auto;background:var(--cb);border-radius:16px;box-shadow:var(--sl);overflow:hidden;}";
-  h += "#header{background:linear-gradient(135deg,var(--pc),var(--ph));color:#fff;text-align:center;padding:20px;font-size:1.1rem;font-weight:700;letter-spacing:-.5px;}";
-  h += "#inputs{padding:40px;margin-top:5px;}";
+  h += "#header{background:linear-gradient(135deg,var(--pc),var(--ph));color:#fff;text-align:center;font-size:1.7rem;font-weight:700;margin:0;letter-spacing:-.5px;border-radius:16px 16px 0 0;padding:15px;display:flex;flex-direction:column;align-items:center;justify-content:center;}";
+  h += ".st{font-size:0.55em;font-weight:400;opacity:0.9;}";
+  h += "#inputs{padding:20px 40px;margin-top:0;}";
   h += ".fg{margin-bottom:24px;}";
   h += ".fl{display:block;font-size:1.1rem;font-weight:500;margin-bottom:8px;}";
   h += "select{width:100%;height:48px;padding:12px;font-size:1.1rem;border:2px solid var(--br);border-radius:8px;background:var(--cb);outline:none;transition:all 0.2s ease;}";
@@ -295,21 +366,29 @@ void LiveFormBuilder::serveForm(WiFiClient& client) {
   h += "input[type=color]::-webkit-color-swatch-wrapper{padding:0;}";
   h += "input[type=color]::-webkit-color-swatch{border:none;border-radius:6px;}";
   h += ".rv{background:var(--pc);color:#fff;padding:3px 10px;border-radius:10px;font-weight:600;min-width:36px;text-align:center;}";
+  h += ".sh{font-size:1.5rem;font-weight:600;color:var(--tp);margin:15px 0 20px 0;padding-bottom:10px;border-bottom:2px solid var(--br);}";
   h += ".sep{width:100%;height:1px;background:var(--br);margin:24px 0;}";
+  h += ".tr{display:flex;gap:10px;align-items:center;}";
+  h += ".tr input[type=text]{flex:1;height:48px;padding:12px;font-size:1.1rem;border:2px solid var(--br);border-radius:8px;background:var(--cb);outline:none;}";
+  h += ".tr input[type=text]:focus{border-color:var(--bf);box-shadow:0 0 0 3px rgba(59,130,246,0.1);}";
+  h += ".sb{height:48px;padding:0 20px;font-size:1.1rem;font-weight:600;color:#fff;background:var(--pc);border:none;border-radius:8px;cursor:pointer;white-space:nowrap;transition:background 0.2s;}";
+  h += ".sb:active{background:var(--ph);}";
   h += ".save-btn{width:100%;padding:20px;font-size:1.2rem;font-weight:600;color:#fff;background:linear-gradient(135deg,var(--sc),#047857);border:none;border-radius:12px;cursor:pointer;margin-top:20px;box-shadow:0 4px 6px -1px rgba(0,0,0,.1);}";
   h += ".save-btn:active{opacity:.85;}";
-  h += ".saved-bd{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;z-index:999;pointer-events:none;transition:opacity .5s;}";
-  h += ".saved-ov{background:rgba(5,150,105,.95);color:#fff;padding:18px 44px;border-radius:14px;font-size:1.4rem;font-weight:700;}";
+  h += ".saved-overlay{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(5,150,105,0.95);color:white;padding:30px 50px;border-radius:16px;font-size:1.6rem;font-weight:700;box-shadow:0 20px 40px rgba(0,0,0,0.3);z-index:1000;transition:opacity 0.6s ease;pointer-events:none;white-space:nowrap;}";
   h += "@media(max-width:600px){body{padding:10px;}#inputs{padding:18px;}}";
   h += "</style></head><body>";
   h += "<div id=\"container\">";
-  h += "<h1 id=\"header\">"; h += _title; h += "<br>"; h += _subtitle; h += "</h1>";
+  h += "<h1 id=\"header\">"; h += _title;
+  if (_subtitle.length() > 0) {
+    h += "<br><span class=\"st\">"; h += _subtitle; h += "</span>";
+  }
+  h += "</h1>";
   h += "<div id=\"inputs\">";
 
   // Generate all fields
   for (int i = 0; i < _fieldCount; i++) {
     LiveField& f = _fields[i];
-    // Skip conditional fields whose predicate returns false
     if (f.condition != nullptr && !f.condition()) continue;
 
     switch (f.type) {
@@ -329,6 +408,9 @@ void LiveFormBuilder::serveForm(WiFiClient& client) {
       case LF_COLORPICKER:
         genColorPicker(h, i);
         break;
+      case LF_TEXTINPUT:
+        genTextInput(h, i);
+        break;
     }
   }
 
@@ -337,11 +419,12 @@ void LiveFormBuilder::serveForm(WiFiClient& client) {
   h += "</div></div>";
   h += "<script>";
   h += "function send(f,v){fetch('/?field='+f+'&value='+v)}";
+  h += "function sendText(id){var m=document.getElementById(id);if(m&&m.value.trim()!=''){fetch('/?field='+id+'&value='+encodeURIComponent(m.value.trim()));m.focus();}}";
   h += "function save(){fetch('/?save=1').then(()=>{";
-  h += "var b=document.createElement('div');b.className='saved-bd';";
-  h += "var o=document.createElement('div');o.className='saved-ov';";
-  h += "o.textContent='Settings Saved';b.appendChild(o);document.body.appendChild(b);";
-  h += "setTimeout(()=>{b.style.opacity='0';setTimeout(()=>b.remove(),500);},2000);})}";
+  h += "var o=document.createElement('div');o.className='saved-overlay';";
+  h += "o.textContent='✓ Settings Saved';";
+  h += "document.body.appendChild(o);";
+  h += "setTimeout(()=>{o.style.opacity='0';setTimeout(()=>o.remove(),600);},2400);})}";
   h += "</script></body></html>";
 
   String headers = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ";
