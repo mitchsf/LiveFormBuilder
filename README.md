@@ -1,5 +1,7 @@
 # LiveFormBuilder
 
+FormBuilder and LiveFormBuilder are deprecated by WebPanel.
+
 AJAX-based live settings form library for ESP32. Generates a responsive web UI that updates device settings in real time — no reboot required. Press **Save** to persist to NVS or LittleFS via a user-provided callback.
 
 ## Features
